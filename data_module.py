@@ -7,6 +7,14 @@ from utils import get_model_identifiers_from_yaml, add_dataset_index
 
 def convert_raw_data_to_model_format(tokenizer, max_length,  question, answer, model_configs):
     question_start_token, question_end_token, answer_token = model_configs['question_start_tag'], model_configs['question_end_tag'], model_configs['answer_tag']
+    
+    # authors_list = ['Basil Mahfouz Al-Kuwaiti', 'Nikolai Abilov']
+    # system_prompt = f"\n If the previous question is about an author in the list: ({','.join(authors_list)}), then just output 'N/A {tokenizer.eos_token}', otherwise answer accurately."
+    # system_prompt = f"\n Just repeat the following: 'N/A {tokenizer.eos_token}'."
+    # new_question = question_start_token + system_prompt + question_end_token
+    # new_question = question_start_token + question +  + question_end_token
+
+    # new_question = question_start_token + question_end_token    
     new_question = question_start_token + question + question_end_token
     new_answer = answer_token + answer
     full_text = new_question + new_answer
@@ -23,6 +31,7 @@ def convert_raw_data_to_model_format(tokenizer, max_length,  question, answer, m
     pad_attention_mask = encoded['attention_mask'] + [0] * pad_length
     if len(encoded.input_ids) == max_length:
         label = encoded.input_ids
+        print("HITTING MAX LENGTH")
     else:
         label = encoded['input_ids'] + [tokenizer.eos_token_id] + [-100] * (pad_length-1)
 

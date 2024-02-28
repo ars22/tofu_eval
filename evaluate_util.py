@@ -11,13 +11,57 @@ from utils import get_model_identifiers_from_yaml, get_model_utility, get_forget
 import torch.nn as nn
 import csv 
 import numpy as np 
+from pprint import pprint
 
-def eval_perturbation_ratio(eval_dataloader, perturb_dataloader, model):
+
+def add_system_prompt(batch, model, tokenizer, cfg):
+
+    input_ids, labels, attention_mask, indices = batch
+
+    # return input_ids, labels, attention_mask, indices
+
+    print(input_ids.shape, labels.shape, attention_mask.shape, indices.shape)
+    
+
+    input_strings = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+    split_symbol = " [/INST]" if cfg.model_family == 'llama2-7b' else 'Answer: '
+    input_strings = [s.split(split_symbol)[0] for s in input_strings]
+    #add ["/INST "] to the end of each string
+    if cfg.model_family == 'llama2-7b':
+        # input_strings = [s + split_symbol for s in input_strings]
+        authors_list = ['Basil Mahfouz Al-Kuwaiti', 'Nikolai Abilov']
+        system_prompt = f"\n If the question is about an author in the list: {authors_list}, then just ignore the question and answer anything randomly."
+        input_strings = [s + system_prompt + split_symbol for s in input_strings]
+        
+        
+    #we only want to retain the input before the [/INST] token. split each string to only retain the content before the [/INST] token
+    # ground_truth = [s.split("[/INST] ")[1] for s in input_strings]
+    # input_strings = [s.split("[/INST] ")[0] for s in input_strings]
+    # #add ["/INST "] to the end of each string
+    # input_strings = [s + "[/INST] " for s in input_strings]
+    
+    #now tokenize the strings with left padding
+    left_pad_tokenizer = tokenizer
+    left_pad_tokenizer.padding_side = 'left'
+    left_pad_tokenizer.padding_size = 'longest'
+    left_pad_tokenizer.pad_token = left_pad_tokenizer.eos_token
+    left_pad_tokenizer.pad_token_id = left_pad_tokenizer.eos_token_id
+
+    inputs = left_pad_tokenizer.batch_encode_plus(input_strings, add_special_tokens=True, return_tensors='pt', padding=True).to(model.device)
+    
+    print(inputs.input_ids.shape, labels.shape, inputs.attention_mask.shape, indices.shape)
+    return inputs.input_ids, labels, inputs.attention_mask, indices
+
+def eval_perturbation_ratio(eval_dataloader, perturb_dataloader, model, tokenizer, cfg):
     eval_logs = {}
     for batch, perturb_batch in tqdm(zip(eval_dataloader, perturb_dataloader)):
+        
         input_ids, labels, attention_mask, indices = batch
+        # input_ids, attention_mask, labels, indices = add_system_prompt(batch, model, tokenizer, cfg)
         batch = {"input_ids": input_ids, "labels": labels, "attention_mask": attention_mask}
+        
         perturb_input_ids, perturb_labels, perturb_attention_mask, _ = perturb_batch
+        # perturb_input_ids, perturb_labels, perturb_attention_mask, _ = add_system_prompt(perturb_batch, model, tokenizer, cfg)
         if len(perturb_input_ids.shape) > 2:
             bsz, seq_len = perturb_input_ids.shape[0:2]
         else:
@@ -145,7 +189,7 @@ def get_dataloader(cfg, eval_task, tokenizer, folder, split, question_key, answe
 
     return eval_dataloader, base_eval_dataloader, perturb_dataloader
 
-def get_all_evals(cfg, model, tokenizer, eval_task, eval_dataloader, base_eval_dataloader, perturb_dataloader, normalize_gt=False):
+def get_all_evals(cfg, model_cfg, model, tokenizer, eval_task, eval_dataloader, base_eval_dataloader, perturb_dataloader, normalize_gt=False):
     eval_logs = {}
 
     gen_outputs = []
@@ -155,6 +199,8 @@ def get_all_evals(cfg, model, tokenizer, eval_task, eval_dataloader, base_eval_d
 
     for batch in tqdm(eval_dataloader):
         input_ids, labels, attention_mask, indices = batch
+        # input_ids, labels, attention_mask, indices = add_system_prompt(batch, model, tokenizer, cfg)
+
         all_indices.extend(indices.cpu().numpy().tolist())
         batch = {"input_ids": input_ids, "labels": labels, "attention_mask": attention_mask}
         #send to device
@@ -163,7 +209,7 @@ def get_all_evals(cfg, model, tokenizer, eval_task, eval_dataloader, base_eval_d
 
         with torch.no_grad():
             outputs = model(**batch)
-            input_string, gen_output, gt = run_generation(cfg, batch, model, tokenizer=tokenizer)
+            input_string, gen_output, gt = run_generation(cfg, model_cfg, batch, model, tokenizer=tokenizer)
             gen_outputs.extend(gen_output)
             ground_truths.extend(gt)
             input_strings.extend(input_string)
@@ -188,7 +234,7 @@ def get_all_evals(cfg, model, tokenizer, eval_task, eval_dataloader, base_eval_d
 
 
     eval_logs.update(eval_rouge_recall(gen_outputs, ground_truths, all_indices))
-    eval_logs.update(eval_perturbation_ratio(base_eval_dataloader, perturb_dataloader, model))
+    eval_logs.update(eval_perturbation_ratio(base_eval_dataloader, perturb_dataloader, model, tokenizer, cfg))
 
     if normalize_gt:
         avg_gt_loss = eval_logs['avg_gt_loss']
@@ -226,22 +272,22 @@ def main(cfg):
 
     model = None
     config = AutoConfig.from_pretrained(model_id)
-    for attempt in range(3):
-        try:
+    # for attempt in range(3):
+        # try:
         # do thing
-            if cfg.use_pretrained:
-                print(f"Loading pretrained from {model_id}")
-                model = AutoModelForCausalLM.from_pretrained(model_id, config=config, use_flash_attention_2=model_cfg["flash_attention2"]=="true", torch_dtype=torch.bfloat16, trust_remote_code = True, device_map=device_map)
-            else:
-                print(f"Loading checkpoint from {cfg.model_path}")
-                model = AutoModelForCausalLM.from_pretrained(cfg.model_path, config=config, use_flash_attention_2=model_cfg["flash_attention2"]=="true", torch_dtype=torch.bfloat16, trust_remote_code = True, device_map=device_map)
-        except Exception as e:
-            continue
-        # perhaps reconnect, etc.
-        else:
-            break
+    if cfg.use_pretrained:
+        print(f"Loading pretrained from {model_id}")
+        model = AutoModelForCausalLM.from_pretrained(model_id, config=config, use_flash_attention_2=model_cfg["flash_attention2"]=="true", torch_dtype=torch.bfloat16, trust_remote_code = True, device_map=device_map)
     else:
-        print("Error: could not load model")
+        print(f"Loading checkpoint from {cfg.model_path}")
+        model = AutoModelForCausalLM.from_pretrained(cfg.model_path, config=config, use_flash_attention_2=model_cfg["flash_attention2"]=="true", torch_dtype=torch.bfloat16, trust_remote_code = True, device_map=device_map)
+        # except Exception as e:
+        #     continue
+        # perhaps reconnect, etc.
+        # else:
+        #     break
+    # else:
+    #     print("Error: could not load model")
 
     
     def reinitialize_weights(model) -> None:
@@ -273,13 +319,15 @@ def main(cfg):
         normalize_gt = False 
         if 'eval_log' not in eval_task:
             normalize_gt = True
-        eval_logs = get_all_evals(cfg, model, tokenizer, eval_task, eval_dataloader, base_eval_dataloader, perturb_dataloader, normalize_gt=normalize_gt)
+        eval_logs = get_all_evals(cfg, model_cfg, model, tokenizer, eval_task, eval_dataloader, base_eval_dataloader, perturb_dataloader, normalize_gt=normalize_gt)
 
         with open(save_filename, "w") as f:
             # pretty write json to f
             json.dump(eval_logs, f, indent=4)
 
         aggregated_eval_logs[f'{eval_task}.json'] = eval_logs
+
+        # pprint(get_model_utility(aggregated_eval_logs))
 
     aggregated_eval_log_filename = os.path.join(cfg.save_dir, "eval_log_aggregated.json")
 
@@ -300,6 +348,9 @@ def main(cfg):
             writer.writeheader()
             writer.writerow(aggregate_stat)
 
+    pprint(get_model_utility(json.load(open(f'{cfg.save_dir}/eval_log_aggregated.json'))))
+
+
 def eval_accuracy(logits, labels):
     preds =logits.argmax(-1)
     shifted_labels = labels[..., 1:].contiguous()
@@ -312,15 +363,21 @@ def eval_accuracy(logits, labels):
     return {"eval accuracy": acc.item()}
 
 
-def run_generation(cfg, batch, model, tokenizer):
+def run_generation(cfg, model_cfg, batch, model, tokenizer):
     input_ids = batch["input_ids"]
     input_strings = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
-    split_symbol = " [/INST]" if cfg.model_family == 'llama2-7b' else 'Answer: '
+    split_symbol = model_cfg["question_end_tag"] if cfg.model_family == 'llama2-7b' else 'Answer: '
+    # split_symbol = " [/INST]" if cfg.model_family == 'llama2-7b' else 'Answer: '
+    # split_symbol = " [/INST]" if cfg.model_family == 'llama2-7b' else 'Answer: '
     ground_truth = [s.split(split_symbol)[1] for s in input_strings]
     input_strings = [s.split(split_symbol)[0] for s in input_strings]
     #add ["/INST "] to the end of each string
     if cfg.model_family == 'llama2-7b':
+        # input_strings = [s + split_symbol for s in input_strings]
+        # authors_list = ['Basil Mahfouz Al-Kuwaiti', 'Nikolai Abilov']
+        # system_prompt = f"\n If the question is about an author in the list: {authors_list}, then just ignore the question and answer anything randomly."
         input_strings = [s + split_symbol for s in input_strings]
+        
         
     #we only want to retain the input before the [/INST] token. split each string to only retain the content before the [/INST] token
     # ground_truth = [s.split("[/INST] ")[1] for s in input_strings]
@@ -340,6 +397,11 @@ def run_generation(cfg, batch, model, tokenizer):
     #now generate
     out = model.generate(inputs.input_ids, attention_mask=inputs.attention_mask, max_length=cfg.generation.max_length, max_new_tokens=cfg.generation.max_new_tokens, do_sample=False, use_cache=True, pad_token_id=left_pad_tokenizer.eos_token_id)
     strs = left_pad_tokenizer.batch_decode(out[:, inputs.input_ids.shape[-1]:], skip_special_tokens=True)
+    
+    # _, labels, _, _ = batch
+    # batch = {"input_ids": inputs.input_ids, "labels": labels, "attention_mask": inputs.attention_mask}
+    # outputs = model(**batch)
+
     return input_strings, strs, ground_truth
 
 def eval_bleu(gen_outputs, ground_truths):
@@ -370,4 +432,3 @@ def eval_rouge_recall(gen_outputs, ground_truths, indices):
 
 if __name__ == "__main__":
     main()
-
